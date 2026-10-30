@@ -1,0 +1,5 @@
+# Real configurations contain credentials: keep them in /etc, never in git.
+*.conf
+!*.conf.example
+*.log
+backups/
