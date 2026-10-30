@@ -3,3 +3,6 @@
 !*.conf.example
 *.log
 backups/
+
+# Claude Code local data (worktrees, settings)
+.claude/
