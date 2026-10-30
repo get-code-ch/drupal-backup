@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 2 - Copy a local backup to S3-compatible object storage, then apply retention.
 #
-# Usage: 2-upload-s3.sh [-s SITE | -c CONFIG_FILE] [BACKUP_NAME]
+# Usage: upload-s3.sh [-s SITE | -c CONFIG_FILE] [BACKUP_NAME]
 #   BACKUP_NAME  directory in $BACKUP_DIR (e.g. 20261030-023000).
 #                Default: the most recent local backup.
 

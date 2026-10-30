@@ -10,14 +10,16 @@ new one. User documentation: [README.md](README.md) (in French).
 | File | Role |
 |---|---|
 | `lib/common.sh` | Sourced first by every script with `"$@"`: strict mode, `-s/-c/-h` options (rest left in `ARGS`), config loading, defaults, helpers |
-| `1-backup.sh` | `drush sql:dump` + `tar` of `SITE_ROOT` into `$BACKUP_DIR/YYYYMMDD-HHMMSS/`, `INFO.txt`, `SHA256SUMS`, local retention |
-| `2-upload-s3.sh [NAME]` | `verify_backup`, `rclone copy` + `rclone check --size-only`, S3 retention |
-| `3-download-s3.sh [--list\|NAME\|latest]` | List or download a backup, then `verify_backup` |
-| `4-restore.sh [opts] [NAME]` | Restore files and/or DB; keeps `$SITE_ROOT.before-restore-<date>` and a DB dump as safety nets |
+| `backup.sh` | `drush sql:dump` + `tar` of `SITE_ROOT` into `$BACKUP_DIR/YYYYMMDD-HHMMSS/`, `INFO.txt`, `SHA256SUMS`, local retention |
+| `upload-s3.sh [NAME]` | `verify_backup`, `rclone copy` + `rclone check --size-only`, S3 retention |
+| `download-s3.sh [--list\|NAME\|latest]` | List or download a backup, then `verify_backup` |
+| `restore.sh [opts] [NAME]` | Restore files and/or DB; keeps `$SITE_ROOT.before-restore-<date>` and a DB dump as safety nets |
+| `clone.sh -t TARGET [--backup NAME\|latest]` | Clone the source (`-s`) into a target site (own `.conf` with `CLONE_*`): fresh `backup.sh` or given backup, new DB + user via `CLONE_MYSQL`, `sites/default/settings.clone.php` included from `settings.php`, staging safeguards |
 | `backup.conf.example` | Documented config template (one file per site) |
 
-Helpers in `lib/common.sh`: `log`/`warn`/`die`, `acquire_lock` (flock on
-`$BACKUP_DIR/.lock`), `require_cmd`, `docroot_of`, `drush` (runs as
+Helpers in `lib/common.sh`: `log`/`warn`/`die`, `load_config` (clears
+`CONFIG_VARS`, sources a file, applies defaults; clone.sh calls it again for
+the target), `acquire_lock` (flock on `$BACKUP_DIR/.lock`, new fd per call), `require_cmd`, `docroot_of`, `drush` (runs as
 `SITE_USER` when root), `setup_rclone` (defines remote `s3:` and
 `$S3_REMOTE`), `latest_local_backup`, `verify_backup`. Reuse them.
 
@@ -29,8 +31,8 @@ Helpers in `lib/common.sh`: `log`/`warn`/`die`, `acquire_lock` (flock on
 - Usage text = the comment block at the top of each script (`usage()` prints it).
 - Config: one `/etc/drupal-backup/<site>.conf` (root, 600) per site, sourced as
   bash. Contains S3 credentials: never commit real `*.conf` (see `.gitignore`).
-  New settings get a default in `lib/common.sh` and a commented entry in
-  `backup.conf.example`.
+  New settings get a default in `load_config` (`lib/common.sh`), a name in
+  `CONFIG_VARS` and a commented entry in `backup.conf.example`.
 - rclone is configured only through `RCLONE_CONFIG_S3_*` environment variables;
   `RCLONE_CONFIG=""` (no rclone.conf, no "not found" notice).
 - Backup names are `YYYYMMDD-HHMMSS` (sortable; retention compares strings).
@@ -42,7 +44,7 @@ Helpers in `lib/common.sh`: `log`/`warn`/`die`, `acquire_lock` (flock on
 - **Cloudflare R2 + old rclone (Debian 1.60)**: after each PUT, rclone sends
   `HEAD ?versionId=...`, which R2 answers with 501 NotImplemented although the
   upload succeeded. Fixed with `RCLONE_CONFIG_S3_NO_HEAD=true`; integrity is
-  checked by `rclone check` in `2-upload-s3.sh`.
+  checked by `rclone check` in `upload-s3.sh`.
 - **R2 EU jurisdiction buckets** need the `https://<account_id>.eu.r2.cloudflarestorage.com`
   endpoint and are invisible to the default Cloudflare API (bucket list).
 - **R2 credentials**: Access Key ID = 32 chars, Secret Access Key = 64 chars.
@@ -55,14 +57,14 @@ Helpers in `lib/common.sh`: `log`/`warn`/`die`, `acquire_lock` (flock on
 ## Verifying a change
 
 1. `bash -n` on every modified script; `shellcheck` if available.
-2. Real run on a test site: `1-backup.sh -s SITE` → `2-upload-s3.sh -s SITE` →
-   `3-download-s3.sh -s SITE --list`, then check exit codes.
+2. Real run on a test site: `backup.sh -s SITE` → `upload-s3.sh -s SITE` →
+   `download-s3.sh -s SITE --list`, then check exit codes.
 3. Error paths: a config with wrong keys must make `--list` exit 1.
-4. Never run `4-restore.sh` on a production site without the owner's explicit OK.
+4. Never run `restore.sh` on a production site without the owner's explicit OK.
 
 ## Open items
 
-- `2-upload-s3.sh` retention loop ends with `|| true`: an rclone listing error
+- `upload-s3.sh` retention loop ends with `|| true`: an rclone listing error
   there is silently ignored (the upload itself is already verified).
-- `3-download-s3.sh latest` prints the `die` message plus two extra
+- `download-s3.sh latest` prints the `die` message plus two extra
   "failed at line ..." lines from the ERR trap in the command substitution.

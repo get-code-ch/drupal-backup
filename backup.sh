@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 1 - Local backup of a Drupal site (database + files).
 #
-# Usage: 1-backup.sh [-s SITE | -c CONFIG_FILE]
+# Usage: backup.sh [-s SITE | -c CONFIG_FILE]
 #
 # Creates $BACKUP_DIR/YYYYMMDD-HHMMSS/ containing:
 #   database.sql.gz  database dump (cache tables without data)

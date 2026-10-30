@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 3 - Download a backup from S3-compatible object storage.
 #
-# Usage: 3-download-s3.sh [-s SITE | -c CONFIG_FILE] --list
+# Usage: download-s3.sh [-s SITE | -c CONFIG_FILE] --list
 #            list the backups available on S3
-#        3-download-s3.sh [-s SITE | -c CONFIG_FILE] [BACKUP_NAME|latest]
+#        download-s3.sh [-s SITE | -c CONFIG_FILE] [BACKUP_NAME|latest]
 #            download into $BACKUP_DIR/BACKUP_NAME (default: latest)
 
 source "$(dirname "$(readlink -f "$0")")/lib/common.sh" "$@"
@@ -40,4 +40,4 @@ log "=== Downloading $S3_REMOTE/$NAME -> $DEST ==="
 rclone copy "$S3_REMOTE/$NAME" "$DEST" --retries 5 --stats-one-line --stats 1m
 verify_backup "$DEST"
 log "Backup available: $DEST"
-log "To restore: $SCRIPT_DIR/4-restore.sh -c $CONFIG_FILE $NAME"
+log "To restore: $SCRIPT_DIR/restore.sh -c $CONFIG_FILE $NAME"

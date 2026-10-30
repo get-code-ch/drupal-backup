@@ -45,6 +45,27 @@ LOCAL_RETENTION_DAYS=7
 # when user IDs differ on a new server. Empty = keep ownership from the archive.
 #RESTORE_OWNER="www-data:www-data"
 
+# --- Clone target (clone.sh) -------------------------------------------------
+# Only in the configuration of a clone (e.g. staging.example.conf), used with
+# "clone.sh -s example -t staging.example". SITE_ROOT and BACKUP_DIR above
+# must differ from the source ones.
+# Host name of the clone (trusted_host_patterns). Required by clone.sh.
+#CLONE_HOST="staging.example.com"
+# Database and user, created by clone.sh with a new password.
+# Default: SITE_NAME with "_" instead of other characters (user: 32 chars max).
+#CLONE_DB_NAME="staging_example"
+#CLONE_DB_USER="staging_example"
+# Database host written in the settings, and host part of the database user.
+#CLONE_DB_HOST="localhost"
+#CLONE_DB_GRANT_HOST="localhost"
+# Client used to create the database and the user. Default: mysql as root
+# (unix socket authentication on Debian/Ubuntu).
+#CLONE_MYSQL=(mysql --defaults-extra-file=/root/.my.cnf)
+# Staging safeguards: no e-mail sent, robots.txt disallows everything,
+# modules below uninstalled. 0 = plain copy under a new name.
+#CLONE_STAGING=1
+#CLONE_UNINSTALL_MODULES=(google_analytics)
+
 # --- S3-compatible object storage --------------------------------------------
 # rclone provider: Other (Hetzner, generic), AWS, Cloudflare, Wasabi, Minio, Scaleway, ...
 S3_PROVIDER="Other"

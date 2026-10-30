@@ -3,7 +3,7 @@
 #     Also works on a new server where the site does not exist yet
 #     (disaster recovery, migration).
 #
-# Usage: 4-restore.sh [-s SITE | -c CONFIG_FILE] [options] [BACKUP_NAME]
+# Usage: restore.sh [-s SITE | -c CONFIG_FILE] [options] [BACKUP_NAME]
 #   BACKUP_NAME      directory in $BACKUP_DIR (default: the most recent)
 #   --db-only        restore the database only
 #   --files-only     restore the files only
@@ -38,7 +38,7 @@ require_cmd tar gzip sha256sum flock
 acquire_lock
 
 NAME="${NAME:-$(latest_local_backup)}"
-[[ -n "$NAME" ]] || die "no local backup in $BACKUP_DIR (see 3-download-s3.sh)"
+[[ -n "$NAME" ]] || die "no local backup in $BACKUP_DIR (see download-s3.sh)"
 SRC="$BACKUP_DIR/$NAME"
 [[ -d "$SRC" ]] || die "backup not found: $SRC"
 verify_backup "$SRC"

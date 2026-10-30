@@ -31,54 +31,80 @@ while (( $# )); do
 done
 
 # --- Configuration file ------------------------------------------------------
-# Priority: -s SITE, then -c FILE / $BACKUP_CONFIG, then the only *.conf in $CONFIG_DIR.
-if [[ -n "$_site" ]]; then
-  CONFIG_FILE="$CONFIG_DIR/$_site.conf"
-elif [[ -n "${BACKUP_CONFIG:-}" ]]; then
-  CONFIG_FILE="$BACKUP_CONFIG"
-else
-  mapfile -t _confs < <(find "$CONFIG_DIR" -maxdepth 1 -name '*.conf' 2>/dev/null | sort)
-  case ${#_confs[@]} in
-    1) CONFIG_FILE="${_confs[0]}" ;;
-    0) die "no configuration found in $CONFIG_DIR (missing, or not readable: run as root?). See backup.conf.example." ;;
-    *) die "several sites configured, choose one with -s: $(printf '%s ' "${_confs[@]##*/}" | sed 's/\.conf//g')" ;;
-  esac
-fi
+# Settings a configuration file may define. They are cleared before a file is
+# loaded, so that clone.sh can load a second (target) configuration.
+CONFIG_VARS=(SITE_NAME SITE_ROOT DOCROOT DRUSH SITE_USER EXCLUDES BACKUP_DIR
+  LOCAL_RETENTION_DAYS LOG_FILE RESTORE_OWNER S3_PROVIDER S3_ENDPOINT S3_REGION
+  S3_BUCKET S3_PREFIX S3_ACCESS_KEY S3_SECRET_KEY S3_RETENTION_DAYS
+  CLONE_HOST CLONE_DB_NAME CLONE_DB_USER CLONE_DB_HOST CLONE_DB_GRANT_HOST
+  CLONE_MYSQL CLONE_STAGING CLONE_UNINSTALL_MODULES)
 
-if [[ ! -r "$CONFIG_FILE" ]]; then
-  cat >&2 <<EOF
+# Loads a configuration file (sets CONFIG_FILE) and applies the defaults.
+load_config() {
+  CONFIG_FILE="$1"
+  if [[ ! -r "$CONFIG_FILE" ]]; then
+    cat >&2 <<EOF
 Configuration not found or not readable: $CONFIG_FILE
 Install it with:
   sudo install -d -m 700 $(dirname "$CONFIG_FILE")
   sudo install -m 600 $SCRIPT_DIR/backup.conf.example $CONFIG_FILE
 The file is only readable by root: run the script with sudo.
 EOF
-  exit 1
+    exit 1
+  fi
+  unset "${CONFIG_VARS[@]}"
+  # shellcheck source=../backup.conf.example
+  source "$CONFIG_FILE"
+
+  # Defaults
+  local v db_default
+  for v in SITE_NAME SITE_ROOT BACKUP_DIR; do
+    [[ -n "${!v:-}" ]] || die "$v is not set in $CONFIG_FILE"
+  done
+  DRUSH="${DRUSH:-$SITE_ROOT/vendor/bin/drush}"
+  SITE_USER="${SITE_USER:-}"
+  RESTORE_OWNER="${RESTORE_OWNER:-}"
+  LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-7}"
+  S3_RETENTION_DAYS="${S3_RETENTION_DAYS:-30}"
+  S3_PREFIX="${S3_PREFIX-drupal/$SITE_NAME}"
+  LOG_FILE="${LOG_FILE-$BACKUP_DIR/backup.log}"   # empty = stdout only
+  [[ -v EXCLUDES ]] || EXCLUDES=()
+  # Clone target (clone.sh): database and user named after SITE_NAME.
+  db_default="$(tr -c 'A-Za-z0-9_\n' '_' <<<"$SITE_NAME")"
+  CLONE_HOST="${CLONE_HOST:-}"
+  CLONE_DB_NAME="${CLONE_DB_NAME:-${db_default:0:64}}"
+  CLONE_DB_USER="${CLONE_DB_USER:-${db_default:0:32}}"
+  CLONE_DB_HOST="${CLONE_DB_HOST:-localhost}"
+  CLONE_DB_GRANT_HOST="${CLONE_DB_GRANT_HOST:-localhost}"
+  [[ -v CLONE_MYSQL ]] || CLONE_MYSQL=(mysql)
+  CLONE_STAGING="${CLONE_STAGING:-1}"
+  [[ -v CLONE_UNINSTALL_MODULES ]] || CLONE_UNINSTALL_MODULES=()
+
+  mkdir -p "$BACKUP_DIR"
+  [[ -z "$LOG_FILE" ]] || mkdir -p "$(dirname "$LOG_FILE")"
+}
+
+# Priority: -s SITE, then -c FILE / $BACKUP_CONFIG, then the only *.conf in $CONFIG_DIR.
+if [[ -n "$_site" ]]; then
+  load_config "$CONFIG_DIR/$_site.conf"
+elif [[ -n "${BACKUP_CONFIG:-}" ]]; then
+  load_config "$BACKUP_CONFIG"
+else
+  mapfile -t _confs < <(find "$CONFIG_DIR" -maxdepth 1 -name '*.conf' 2>/dev/null | sort)
+  case ${#_confs[@]} in
+    1) load_config "${_confs[0]}" ;;
+    0) die "no configuration found in $CONFIG_DIR (missing, or not readable: run as root?). See backup.conf.example." ;;
+    *) die "several sites configured, choose one with -s: $(printf '%s ' "${_confs[@]##*/}" | sed 's/\.conf//g')" ;;
+  esac
 fi
-# shellcheck source=../backup.conf.example
-source "$CONFIG_FILE"
-
-# --- Defaults ----------------------------------------------------------------
-for _v in SITE_NAME SITE_ROOT BACKUP_DIR; do
-  [[ -n "${!_v:-}" ]] || die "$_v is not set in $CONFIG_FILE"
-done
-DRUSH="${DRUSH:-$SITE_ROOT/vendor/bin/drush}"
-SITE_USER="${SITE_USER:-}"
-RESTORE_OWNER="${RESTORE_OWNER:-}"
-LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-7}"
-S3_RETENTION_DAYS="${S3_RETENTION_DAYS:-30}"
-S3_PREFIX="${S3_PREFIX-drupal/$SITE_NAME}"
-LOG_FILE="${LOG_FILE-$BACKUP_DIR/backup.log}"   # empty = stdout only
-[[ -v EXCLUDES ]] || EXCLUDES=()
-
-mkdir -p "$BACKUP_DIR"
-[[ -n "$LOG_FILE" ]] && mkdir -p "$(dirname "$LOG_FILE")"
 
 # --- Helpers -----------------------------------------------------------------
-# Prevents two scripts from running at the same time on the same site.
+# Prevents two scripts from running at the same time on the same site. Each
+# call opens its own descriptor (clone.sh locks both the source and the target).
 acquire_lock() {
-  exec 9>"$BACKUP_DIR/.lock"
-  flock -n 9 || die "another backup/restore script is running for $SITE_NAME"
+  local fd
+  exec {fd}>"$BACKUP_DIR/.lock"
+  flock -n "$fd" || die "another backup/restore script is running for $SITE_NAME"
 }
 
 require_cmd() {
@@ -128,7 +154,7 @@ setup_rclone() {
   export RCLONE_CONFIG_S3_ACL=private
   export RCLONE_CONFIG_S3_NO_CHECK_BUCKET=true
   # No HEAD after each upload: R2 rejects "HEAD ?versionId=" (501) with older
-  # rclone; 2-upload-s3.sh checks the uploaded sizes with "rclone check".
+  # rclone; upload-s3.sh checks the uploaded sizes with "rclone check".
   export RCLONE_CONFIG_S3_NO_HEAD=true
   S3_REMOTE="s3:$S3_BUCKET${S3_PREFIX:+/$S3_PREFIX}"
 }

@@ -7,10 +7,11 @@ même serveur ou sur un nouveau (reprise après sinistre, migration).
 
 | Script | Rôle |
 |---|---|
-| `1-backup.sh` | Sauvegarde locale : base (`drush sql:dump`) + fichiers (`tar`) |
-| `2-upload-s3.sh [NOM]` | Envoi d'une sauvegarde sur S3, vérification, rétention |
-| `3-download-s3.sh [--list \| NOM \| latest]` | Récupération d'une sauvegarde depuis S3 |
-| `4-restore.sh [options] [NOM]` | Restauration des fichiers et/ou de la base |
+| `backup.sh` | Sauvegarde locale : base (`drush sql:dump`) + fichiers (`tar`) |
+| `upload-s3.sh [NOM]` | Envoi d'une sauvegarde sur S3, vérification, rétention |
+| `download-s3.sh [--list \| NOM \| latest]` | Récupération d'une sauvegarde depuis S3 |
+| `restore.sh [options] [NOM]` | Restauration des fichiers et/ou de la base |
+| `clone.sh -t CIBLE [--backup NOM]` | Clone du site sous un autre nom (ex. staging) : nouveau dossier, nouvelle base |
 
 Options communes : `-s SITE` (lit `/etc/drupal-backup/SITE.conf`),
 `-c FICHIER` (autre fichier de configuration), `-h` (aide).
@@ -54,7 +55,7 @@ clés via R2 → *Manage API tokens* (permission *Object Read & Write* sur le bu
 Test de la connexion S3 :
 
 ```bash
-sudo /opt/drupal-backup/3-download-s3.sh -s monsite --list
+sudo /opt/drupal-backup/download-s3.sh -s monsite --list
 ```
 
 Les scripts doivent tourner **en root** : la configuration n'est lisible que par
@@ -79,9 +80,9 @@ exécuté sous `SITE_USER` (par défaut le propriétaire de `SITE_ROOT`).
 
 ```cron
 # Tous les jours à 02h30 : sauvegarde locale puis envoi sur S3
-30 2 * * * /opt/drupal-backup/1-backup.sh -s monsite >/dev/null && /opt/drupal-backup/2-upload-s3.sh -s monsite >/dev/null
+30 2 * * * /opt/drupal-backup/backup.sh -s monsite >/dev/null && /opt/drupal-backup/upload-s3.sh -s monsite >/dev/null
 # Un second site, un quart d'heure plus tard
-45 2 * * * /opt/drupal-backup/1-backup.sh -s autresite >/dev/null && /opt/drupal-backup/2-upload-s3.sh -s autresite >/dev/null
+45 2 * * * /opt/drupal-backup/backup.sh -s autresite >/dev/null && /opt/drupal-backup/upload-s3.sh -s autresite >/dev/null
 ```
 
 Le détail est écrit dans `LOG_FILE` (par défaut `$BACKUP_DIR/backup.log`) ; les
@@ -91,15 +92,15 @@ Rétention : `LOCAL_RETENTION_DAYS` et `S3_RETENTION_DAYS`.
 ## Restauration sur le même serveur
 
 ```bash
-sudo /opt/drupal-backup/3-download-s3.sh -s monsite --list
+sudo /opt/drupal-backup/download-s3.sh -s monsite --list
 ```
 
 ```bash
-sudo /opt/drupal-backup/3-download-s3.sh -s monsite 20261030-023000
+sudo /opt/drupal-backup/download-s3.sh -s monsite 20261030-023000
 ```
 
 ```bash
-sudo /opt/drupal-backup/4-restore.sh -s monsite 20261030-023000
+sudo /opt/drupal-backup/restore.sh -s monsite 20261030-023000
 ```
 
 Le script vérifie les sommes de contrôle, demande de taper `yes`, puis :
@@ -141,13 +142,13 @@ sudo chmod -R u+w /var/www/monsite.before-restore-<date> && sudo rm -rf /var/www
 4. Récupérer la sauvegarde :
 
    ```bash
-   sudo /opt/drupal-backup/3-download-s3.sh -s monsite latest
+   sudo /opt/drupal-backup/download-s3.sh -s monsite latest
    ```
 
 5. Restaurer les fichiers seuls :
 
    ```bash
-   sudo /opt/drupal-backup/4-restore.sh -s monsite --files-only
+   sudo /opt/drupal-backup/restore.sh -s monsite --files-only
    ```
 
    Si `SITE_ROOT` est différent de celui d'origine, le script affiche les lignes
@@ -157,7 +158,7 @@ sudo chmod -R u+w /var/www/monsite.before-restore-<date> && sudo rm -rf /var/www
 6. Restaurer la base :
 
    ```bash
-   sudo /opt/drupal-backup/4-restore.sh -s monsite --db-only
+   sudo /opt/drupal-backup/restore.sh -s monsite --db-only
    ```
 
 7. Configurer le virtual host (racine = docroot du site), le DNS et le
@@ -165,6 +166,76 @@ sudo chmod -R u+w /var/www/monsite.before-restore-<date> && sudo rm -rf /var/www
 
 Si les identifiants de la base sont identiques, les étapes 5 et 6 peuvent se
 faire en une seule commande, sans `--files-only` ni `--db-only`.
+
+## Cloner un site (staging)
+
+`clone.sh` copie un site sur le même serveur sous un autre nom, par exemple
+`ev-euterpe.ch` → `staging.ev-euterpe.ch`, avec son propre dossier, sa propre
+base et son propre utilisateur MySQL. Relancé, il rafraîchit le clone.
+
+1. Créer la configuration de la cible, une configuration normale avec en plus
+   les réglages `CLONE_*` (voir `backup.conf.example`) :
+
+   ```bash
+   sudo install -m 600 /opt/drupal-backup/backup.conf.example /etc/drupal-backup/staging.ev-euterpe.conf
+   ```
+
+   ```bash
+   SITE_NAME="staging.ev-euterpe"
+   SITE_ROOT="/var/www/staging.ev-euterpe"
+   BACKUP_DIR="/var/backups/drupal/$SITE_NAME"
+   CLONE_HOST="staging.ev-euterpe.ch"
+   #CLONE_UNINSTALL_MODULES=(google_analytics)
+   ```
+
+   La base et l'utilisateur s'appellent par défaut `staging_ev_euterpe`
+   (`CLONE_DB_NAME`, `CLONE_DB_USER`). Ils sont créés avec le client `mysql`
+   lancé en root (`CLONE_MYSQL`).
+
+2. Cloner le site en direct (une sauvegarde fraîche est d'abord faite avec
+   `backup.sh`) :
+
+   ```bash
+   sudo /opt/drupal-backup/clone.sh -s ev-euterpe -t staging.ev-euterpe
+   ```
+
+   ou à partir d'une sauvegarde existante (locale, sinon téléchargée depuis S3 ;
+   `latest` = la plus récente en local) :
+
+   ```bash
+   sudo /opt/drupal-backup/clone.sh -s ev-euterpe -t staging.ev-euterpe --backup 20261030-023000
+   ```
+
+3. Configurer le virtual host (racine = docroot du clone), le DNS et le
+   certificat TLS de `staging.ev-euterpe.ch`.
+
+Le script :
+
+- crée la base et l'utilisateur avec un nouveau mot de passe, ou les recrée
+  lors d'un rafraîchissement ;
+- écrit `sites/default/settings.clone.php`, inclus à la fin de `settings.php`.
+  Ce fichier contient les identifiants de la nouvelle base, le
+  `trusted_host_patterns` du nouveau nom et un nouveau `hash_salt`. Il fait
+  aussi pointer vers le clone les chemins absolus `file_private_path`,
+  `file_temp_path` et `config_sync_directory` qui désignaient le site source ;
+- applique, avec `CLONE_STAGING=1` (par défaut), des garde-fous de staging :
+  aucun e-mail envoyé (collecteur de test de Drupal, `smtp` désactivé),
+  `robots.txt` qui interdit tout et désinstallation des modules de
+  `CLONE_UNINSTALL_MODULES` ;
+- importe la base, lance `drush cache:rebuild` et sort le site de la maintenance.
+
+Sécurités : le script refuse de cloner si la base ou l'utilisateur de la cible
+sont ceux du site source. Il ne remplace une cible existante que si elle a été
+créée par `clone.sh` (présence de `settings.clone.php`). Il refuse aussi de
+toucher une base ou un utilisateur MySQL existants quand le dossier cible
+n'existe pas. Lors d'un rafraîchissement, l'ancien clone est supprimé une fois
+le nouveau en place.
+
+Limites : seul `sites/default` est adapté (le multisite n'est pas géré). Les
+modules d'envoi d'e-mails comme Symfony Mailer ne passent pas par le
+collecteur de test et doivent être désactivés à la main. Un dossier privé
+situé hors de `SITE_ROOT` n'est pas copié : le script le signale, et il faut
+le surcharger dans un autre fichier de settings.
 
 ## Sécurité
 
