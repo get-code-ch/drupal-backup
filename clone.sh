@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Clone a Drupal site into a new environment on this server, e.g.
-# ev-euterpe.ch -> staging.ev-euterpe.ch: new directory, new database and
-# database user, new host name. Run it again to refresh the clone.
+# Clone a Drupal site into another site on this server, e.g.
+# ev-euterpe.ch -> staging.ev-euterpe.ch (new directory, new database and
+# database user, new host name), or back into an existing site
+# (staging.ev-euterpe.ch -> ev-euterpe.ch). Run it again to refresh a clone.
 #
 # Usage: clone.sh [-s SITE | -c CONFIG_FILE] (-t TARGET | --target-config FILE) [options]
 #   -s / -c               source site
@@ -15,11 +16,17 @@
 # The target configuration is a normal site configuration (SITE_ROOT,
 # BACKUP_DIR, ...) with the CLONE_* settings (see backup.conf.example).
 # Without --backup, a fresh backup of the source is made first (backup.sh).
-# The database and its user are created with CLONE_MYSQL (default: mysql as
-# root) and a new password. The clone gets sites/default/settings.clone.php
-# (database, trusted host, new hash_salt, staging safeguards), included at
-# the end of its settings.php. An existing target is replaced (database
-# included) only if it was created by clone.sh.
+#
+# New site (default): the database and its user are created with CLONE_MYSQL
+# (default: mysql as root) and a new password. The clone gets
+# sites/default/settings.clone.php (database, trusted host, new hash_salt,
+# staging safeguards), included at the end of its settings.php. An existing
+# target is replaced (database included) only if it was created by clone.sh.
+#
+# Existing site (CLONE_KEEP_SETTINGS=1, e.g. production): the target keeps its
+# settings*.php, services.yml, robots.txt, database and database user; its
+# tables are replaced. The target is backed up first (backup.sh) and its
+# previous tree is kept as $SITE_ROOT.before-clone-<date>.
 
 source "$(dirname "$(readlink -f "$0")")/lib/common.sh" "$@"
 set -- "${ARGS[@]}"
@@ -73,39 +80,53 @@ SRC_DB="" SRC_DB_USER=""
 if [[ -d "$SITE_ROOT" ]]; then
   SRC_DB="$(trap - ERR; drush status --field=db-name 2>/dev/null)" || SRC_DB=""
   SRC_DB_USER="$(trap - ERR; drush status --field=db-username 2>/dev/null)" || SRC_DB_USER=""
-  [[ -n "$SRC_DB" ]] || warn "cannot read the database name of $SITE_NAME: make sure CLONE_DB_NAME is not the production one"
+  [[ -n "$SRC_DB" ]] || warn "cannot read the database name of $SITE_NAME: make sure the target database is not the source one"
 fi
 SRC_SITE="$SITE_NAME" SRC_ROOT="$SITE_ROOT" SRC_BACKUP_DIR="$BACKUP_DIR"
 
 # --- Target ------------------------------------------------------------------
 load_config "$TARGET_CONFIG"
-[[ -n "$CLONE_HOST" ]] || die "CLONE_HOST (host name of the clone) is not set in $CONFIG_FILE"
-[[ "$CLONE_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid CLONE_HOST: $CLONE_HOST"
+TARGET_CONFIG="$CONFIG_FILE"
+KEEP="$CLONE_KEEP_SETTINGS"
 [[ "$SITE_ROOT" != "$SRC_ROOT" ]] || die "the target SITE_ROOT is the source one: $SITE_ROOT"
 [[ "$BACKUP_DIR" != "$SRC_BACKUP_DIR" ]] || die "the target BACKUP_DIR is the source one: $BACKUP_DIR"
-for v in CLONE_DB_NAME CLONE_DB_USER; do
-  [[ "${!v}" =~ ^[A-Za-z0-9_]+$ ]] || die "$v may only contain letters, digits and _: ${!v}"
-done
-[[ "$CLONE_DB_GRANT_HOST" =~ ^[A-Za-z0-9._%-]+$ ]] || die "invalid CLONE_DB_GRANT_HOST: $CLONE_DB_GRANT_HOST"
-[[ "$CLONE_DB_NAME" != "$SRC_DB" ]] || die "CLONE_DB_NAME is the database of the source: $CLONE_DB_NAME"
-[[ "$CLONE_DB_USER" != "$SRC_DB_USER" ]] || die "CLONE_DB_USER is the database user of the source: $CLONE_DB_USER"
 require_cmd "${CLONE_MYSQL[0]}"
-acquire_lock
 
-mysql_admin() { "${CLONE_MYSQL[@]}" -N -B; }
+mysql_admin() { "${CLONE_MYSQL[@]}" -N -B "$@"; }
 mysql_admin <<<'SELECT 1' >/dev/null \
   || die "cannot connect to the database server as administrator with: ${CLONE_MYSQL[*]} (see CLONE_MYSQL)"
-DB_EXISTS="$(mysql_admin <<<"SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '$CLONE_DB_NAME'")"
-USER_EXISTS="$(mysql_admin <<<"SELECT COUNT(*) FROM mysql.user WHERE User = '$CLONE_DB_USER' AND Host = '$CLONE_DB_GRANT_HOST'")"
+db_exists() { mysql_admin <<<"SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '$1'"; }
 
 TARGET_EXISTS=0
-if [[ -e "$SITE_ROOT" ]]; then
-  [[ -f "$(docroot_of "$SITE_ROOT")/sites/default/settings.clone.php" ]] \
-    || die "$SITE_ROOT exists and was not created by clone.sh: refusing to replace it"
-  TARGET_EXISTS=1
+[[ -e "$SITE_ROOT" ]] && TARGET_EXISTS=1
+if (( KEEP )); then
+  # Existing site: its own settings point to its own database.
+  (( TARGET_EXISTS )) || die "CLONE_KEEP_SETTINGS=1 needs an existing site at $SITE_ROOT"
+  CLONE_STAGING=0
+  DB_NAME="$(trap - ERR; drush status --field=db-name 2>/dev/null)" || DB_NAME=""
+  [[ -n "$DB_NAME" ]] || die "cannot read the database name of $SITE_NAME (drush status)"
+  [[ "$DB_NAME" =~ ^[A-Za-z0-9_]+$ ]] || die "unexpected database name for $SITE_NAME: $DB_NAME"
+  [[ "$DB_NAME" != "$SRC_DB" ]] || die "$SRC_SITE and $SITE_NAME use the same database: $DB_NAME"
+  (( $(db_exists "$DB_NAME") == 1 )) || die "database $DB_NAME of $SITE_NAME not found with ${CLONE_MYSQL[*]} (database on another server?)"
 else
-  (( DB_EXISTS == 0 )) || die "database $CLONE_DB_NAME exists but $SITE_ROOT does not: refusing to drop it"
-  (( USER_EXISTS == 0 )) || die "database user $CLONE_DB_USER@$CLONE_DB_GRANT_HOST exists but $SITE_ROOT does not: refusing to change its password"
+  if (( TARGET_EXISTS )) && [[ ! -f "$(docroot_of "$SITE_ROOT")/sites/default/settings.clone.php" ]]; then
+    die "$SITE_ROOT exists and was not created by clone.sh: refusing to replace it (existing site: set CLONE_KEEP_SETTINGS=1)"
+  fi
+  [[ -n "$CLONE_HOST" ]] || die "CLONE_HOST (host name of the clone) is not set in $CONFIG_FILE"
+  [[ "$CLONE_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid CLONE_HOST: $CLONE_HOST"
+  for v in CLONE_DB_NAME CLONE_DB_USER; do
+    [[ "${!v}" =~ ^[A-Za-z0-9_]+$ ]] || die "$v may only contain letters, digits and _: ${!v}"
+  done
+  [[ "$CLONE_DB_GRANT_HOST" =~ ^[A-Za-z0-9._%-]+$ ]] || die "invalid CLONE_DB_GRANT_HOST: $CLONE_DB_GRANT_HOST"
+  [[ "$CLONE_DB_NAME" != "$SRC_DB" ]] || die "CLONE_DB_NAME is the database of the source: $CLONE_DB_NAME"
+  [[ "$CLONE_DB_USER" != "$SRC_DB_USER" ]] || die "CLONE_DB_USER is the database user of the source: $CLONE_DB_USER"
+  DB_NAME="$CLONE_DB_NAME"
+  DB_EXISTS="$(db_exists "$DB_NAME")"
+  USER_EXISTS="$(mysql_admin <<<"SELECT COUNT(*) FROM mysql.user WHERE User = '$CLONE_DB_USER' AND Host = '$CLONE_DB_GRANT_HOST'")"
+  if (( ! TARGET_EXISTS )); then
+    (( DB_EXISTS == 0 )) || die "database $CLONE_DB_NAME exists but $SITE_ROOT does not: refusing to drop it"
+    (( USER_EXISTS == 0 )) || die "database user $CLONE_DB_USER@$CLONE_DB_GRANT_HOST exists but $SITE_ROOT does not: refusing to change its password"
+  fi
 fi
 
 STAMP="$(date '+%Y%m%d-%H%M%S')"
@@ -116,27 +137,46 @@ echo
 echo "Cloning $SRC_SITE, backup $BACKUP_NAME:"
 sed 's/^/    /' "$SRC/INFO.txt"
 echo "Target: $SITE_NAME"
-if (( TARGET_EXISTS )); then
+if (( KEEP )); then
+  echo "  - existing site: it is backed up first (backup.sh)"
+  echo "  - files: $SITE_ROOT will be REPLACED (current tree -> $OLD_ROOT);"
+  echo "    its settings*.php, services.yml and robots.txt are kept"
+  echo "  - database: all tables of $DB_NAME will be REPLACED"
+elif (( TARGET_EXISTS )); then
   echo "  - files: $SITE_ROOT will be REPLACED"
 else
   echo "  - files: $SITE_ROOT will be created"
 fi
-if (( DB_EXISTS )); then
-  echo "  - database: $CLONE_DB_NAME will be DROPPED and recreated"
-else
-  echo "  - database: $CLONE_DB_NAME will be created"
+if (( ! KEEP )); then
+  if (( DB_EXISTS )); then
+    echo "  - database: $CLONE_DB_NAME will be DROPPED and recreated"
+  else
+    echo "  - database: $CLONE_DB_NAME will be created"
+  fi
+  echo "  - database user: $CLONE_DB_USER@$CLONE_DB_GRANT_HOST (new password)"
+  echo "  - host: $CLONE_HOST"
 fi
-echo "  - database user: $CLONE_DB_USER@$CLONE_DB_GRANT_HOST (new password)"
-echo "  - host: $CLONE_HOST"
 if (( CLONE_STAGING )); then
   echo "  - staging: no e-mail sent, robots.txt disallows everything${CLONE_UNINSTALL_MODULES[*]:+, uninstall ${CLONE_UNINSTALL_MODULES[*]}}"
 fi
 if (( ! ASSUME_YES )); then
-  read -r -p "Type 'yes' to confirm: " answer
-  [[ "$answer" == "yes" ]] || die "clone cancelled"
+  if (( KEEP )); then
+    read -r -p "Type the target site name ($SITE_NAME) to confirm: " answer
+    [[ "$answer" == "$SITE_NAME" ]] || die "clone cancelled"
+  else
+    read -r -p "Type 'yes' to confirm: " answer
+    [[ "$answer" == "yes" ]] || die "clone cancelled"
+  fi
 fi
 
-log "=== Cloning $SRC_SITE ($BACKUP_NAME) into $SITE_ROOT ($CLONE_HOST) ==="
+if (( KEEP )); then
+  log "Backup of the target $SITE_NAME..."
+  "$SCRIPT_DIR/backup.sh" -c "$TARGET_CONFIG" || die "backup of $SITE_NAME failed, nothing changed"
+  TARGET_BACKUP="$(latest_local_backup)"
+fi
+acquire_lock
+
+log "=== Cloning $SRC_SITE ($BACKUP_NAME) into $SITE_ROOT${CLONE_HOST:+ ($CLONE_HOST)} ==="
 
 # --- Files -------------------------------------------------------------------
 log "Extracting files into $NEW_ROOT..."
@@ -150,23 +190,55 @@ if [[ -n "$RESTORE_OWNER" ]]; then
   (( EUID == 0 )) || die "RESTORE_OWNER requires running as root"
   log "Setting owner $RESTORE_OWNER"
   chown -R "$RESTORE_OWNER" "$NEW_ROOT"
+elif (( TARGET_EXISTS && EUID == 0 )); then
+  chown --reference="$SITE_ROOT" "$NEW_ROOT"
 fi
+(( TARGET_EXISTS )) && chmod --reference="$SITE_ROOT" "$NEW_ROOT"
 
 new_doc="$(docroot_of "$NEW_ROOT")"
 site_dir="$new_doc/sites/default"
 [[ -f "$site_dir/settings.php" ]] || die "settings.php not found in the backup: $site_dir/settings.php"
-others="$(find "$new_doc/sites" -mindepth 2 -maxdepth 2 -name settings.php ! -path "$site_dir/*")"
-[[ -z "$others" ]] || warn "multisite: only sites/default is adapted, these still use the source settings: $others"
 
-log "Writing $site_dir/settings.clone.php"
-DB_PASS="$(random_string 32)"
-grep -q '?>[[:space:]]*$' <(tail -c 100 "$site_dir/settings.php") \
-  && die "settings.php ends with '?>': remove it in the source so that clone.sh can append to it"
-site_mode="$(stat -c %a "$site_dir")"
-settings_mode="$(stat -c %a "$site_dir/settings.php")"
-chmod u+w "$site_dir" "$site_dir/settings.php"
-{
-  cat <<EOF
+if (( KEEP )); then
+  # The settings of the source (settings.clone.php of a staging, ...) are
+  # replaced by the ones of the target.
+  old_doc="$(docroot_of "$SITE_ROOT")"
+  for d in "$new_doc"/sites/*/; do
+    mode="$(stat -c %a "$d")"
+    chmod u+w "$d"
+    find "$d" -maxdepth 1 -type f \( -name 'settings*.php' -o -name 'services.yml' \) -delete
+    chmod "$mode" "$d"
+  done
+  while IFS= read -r -d '' f; do
+    rel="${f#"$old_doc"/}"
+    d="$(dirname "$new_doc/$rel")"
+    mkdir -p "$d"
+    mode="$(stat -c %a "$d")"
+    chmod u+w "$d"
+    cp -p "$f" "$new_doc/$rel"
+    chmod "$mode" "$d"
+    log "Kept $rel"
+  done < <(find "$old_doc/sites" -mindepth 2 -maxdepth 2 \
+             \( -name 'settings*.php' -o -name 'services.yml' \) -print0)
+  if [[ -f "$old_doc/robots.txt" ]]; then
+    cp -p "$old_doc/robots.txt" "$new_doc/robots.txt"
+  else
+    rm -f "$new_doc/robots.txt"
+  fi
+  log "Kept robots.txt"
+else
+  others="$(find "$new_doc/sites" -mindepth 2 -maxdepth 2 -name settings.php ! -path "$site_dir/*")"
+  [[ -z "$others" ]] || warn "multisite: only sites/default is adapted, these still use the source settings: $others"
+
+  log "Writing $site_dir/settings.clone.php"
+  DB_PASS="$(random_string 32)"
+  grep -q '?>[[:space:]]*$' <(tail -c 100 "$site_dir/settings.php") \
+    && die "settings.php ends with '?>': remove it in the source so that clone.sh can append to it"
+  site_mode="$(stat -c %a "$site_dir")"
+  settings_mode="$(stat -c %a "$site_dir/settings.php")"
+  chmod u+w "$site_dir" "$site_dir/settings.php"
+  {
+    cat <<EOF
 <?php
 
 /**
@@ -193,8 +265,8 @@ foreach (['file_private_path', 'file_temp_path', 'config_sync_directory'] as \$k
   }
 }
 EOF
-  if (( CLONE_STAGING )); then
-    cat <<'EOF'
+    if (( CLONE_STAGING )); then
+      cat <<'EOF'
 
 // Staging safeguards (CLONE_STAGING=1).
 // No e-mail is sent: messages are only kept in the state (test mail collector).
@@ -204,49 +276,54 @@ $config['smtp.settings']['smtp_on'] = FALSE;
 // Not indexed by search engines (robots.txt is replaced as well).
 $config['robotstxt.settings']['content'] = "User-agent: *\nDisallow: /\n";
 EOF
-  fi
-} >"$site_dir/settings.clone.php"
-chown --reference="$site_dir/settings.php" "$site_dir/settings.clone.php"
-cat >>"$site_dir/settings.php" <<'EOF'
+    fi
+  } >"$site_dir/settings.clone.php"
+  chown --reference="$site_dir/settings.php" "$site_dir/settings.clone.php"
+  cat >>"$site_dir/settings.php" <<'EOF'
 
 // Added by drupal-backup clone.sh: settings of this clone.
 include $app_root . '/' . $site_path . '/settings.clone.php';
 EOF
-chmod "$settings_mode" "$site_dir/settings.php" "$site_dir/settings.clone.php"
-chmod "$site_mode" "$site_dir"
+  chmod "$settings_mode" "$site_dir/settings.php" "$site_dir/settings.clone.php"
+  chmod "$site_mode" "$site_dir"
 
-if (( CLONE_STAGING )); then
-  if [[ ! -f "$new_doc/robots.txt" ]]; then
-    touch "$new_doc/robots.txt"
-    chown --reference="$new_doc/index.php" "$new_doc/robots.txt"
-    chmod --reference="$new_doc/index.php" "$new_doc/robots.txt"
+  if (( CLONE_STAGING )); then
+    if [[ ! -f "$new_doc/robots.txt" ]]; then
+      touch "$new_doc/robots.txt"
+      chown --reference="$new_doc/index.php" "$new_doc/robots.txt"
+      chmod --reference="$new_doc/index.php" "$new_doc/robots.txt"
+    fi
+    printf 'User-agent: *\nDisallow: /\n' >"$new_doc/robots.txt"
   fi
-  printf 'User-agent: *\nDisallow: /\n' >"$new_doc/robots.txt"
-fi
 
-# Absolute paths of the source left in the settings (other than the ones above).
-hits="$(grep -HnF "$ORIG_ROOT" "$site_dir"/settings*.php 2>/dev/null \
-  | grep -vE ':[0-9]+:\s*(#|\*|//)|file_private_path|file_temp_path|config_sync_directory|clone_source_root' || true)"
-if [[ -n "$hits" ]]; then
-  warn "the settings still reference the source path $ORIG_ROOT, check these lines:"
-  echo "$hits" | sed "s#^$NEW_ROOT#$SITE_ROOT#; s/^/    /" >&2
-fi
+  # Absolute paths of the source left in the settings (other than the ones above).
+  hits="$(grep -HnF "$ORIG_ROOT" "$site_dir"/settings*.php 2>/dev/null \
+    | grep -vE ':[0-9]+:\s*(#|\*|//)|file_private_path|file_temp_path|config_sync_directory|clone_source_root' || true)"
+  if [[ -n "$hits" ]]; then
+    warn "the settings still reference the source path $ORIG_ROOT, check these lines:"
+    echo "$hits" | sed "s#^$NEW_ROOT#$SITE_ROOT#; s/^/    /" >&2
+  fi
 
-# --- Database ----------------------------------------------------------------
-log "Creating database $CLONE_DB_NAME and user $CLONE_DB_USER@$CLONE_DB_GRANT_HOST..."
-user="'$CLONE_DB_USER'@'$CLONE_DB_GRANT_HOST'"
-{
-  (( DB_EXISTS )) && echo "DROP DATABASE \`$CLONE_DB_NAME\`;"
-  cat <<EOF
+  # --- Database ---
+  log "Creating database $CLONE_DB_NAME and user $CLONE_DB_USER@$CLONE_DB_GRANT_HOST..."
+  user="'$CLONE_DB_USER'@'$CLONE_DB_GRANT_HOST'"
+  {
+    (( DB_EXISTS )) && echo "DROP DATABASE \`$CLONE_DB_NAME\`;"
+    cat <<EOF
 CREATE DATABASE \`$CLONE_DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE USER IF NOT EXISTS $user IDENTIFIED BY '$DB_PASS';
 ALTER USER $user IDENTIFIED BY '$DB_PASS';
 GRANT ALL PRIVILEGES ON \`$CLONE_DB_NAME\`.* TO $user;
 EOF
-} | mysql_admin
+  } | mysql_admin
+fi
 
 # --- Switch ------------------------------------------------------------------
 if (( TARGET_EXISTS )); then
+  if (( KEEP )); then
+    drush state:set system.maintenance_mode 1 --input-format=integer >/dev/null 2>&1 \
+      || warn "could not put $SITE_NAME in maintenance mode"
+  fi
   log "Switching: $SITE_ROOT -> $OLD_ROOT"
   mv "$SITE_ROOT" "$OLD_ROOT"
 fi
@@ -254,8 +331,12 @@ mv "$NEW_ROOT" "$SITE_ROOT"
 trap - EXIT
 log "Files cloned in $SITE_ROOT"
 
-log "Importing database..."
-gzip -dc "$SRC/database.sql.gz" | drush sql:cli
+if (( KEEP )); then
+  log "Dropping current tables of $DB_NAME..."
+  drush sql:drop -y
+fi
+log "Importing database into $DB_NAME..."
+gzip -dc "$SRC/database.sql.gz" | mysql_admin "$DB_NAME"
 log "Rebuilding caches..."
 drush cache:rebuild
 
@@ -276,21 +357,28 @@ if (( CLONE_STAGING && ${#CLONE_UNINSTALL_MODULES[@]} )); then
 fi
 drush state:set system.maintenance_mode 0 --input-format=integer
 
-# Directories outside the clone would be shared with the source.
-for key in file_private_path config_sync_directory; do
-  val="$(drush php:eval "echo \Drupal\Core\Site\Settings::get('$key', '');")"
-  if [[ "$val" == /* && "$val" != "$SITE_ROOT"/* ]]; then
-    warn "$key is outside the clone: $val (shared with the source?), override it in another settings file"
-  fi
-done
+if (( ! KEEP )); then
+  # Directories outside the clone would be shared with the source.
+  for key in file_private_path config_sync_directory; do
+    val="$(drush php:eval "echo \Drupal\Core\Site\Settings::get('$key', '');")"
+    if [[ "$val" == /* && "$val" != "$SITE_ROOT"/* ]]; then
+      warn "$key is outside the clone: $val (shared with the source?), override it in another settings file"
+    fi
+  done
+fi
 drush status --fields=drupal-version,db-status,bootstrap
 
-if (( TARGET_EXISTS )); then
-  log "Removing the previous clone $OLD_ROOT"
-  chmod -R u+w "$OLD_ROOT"
-  rm -rf "$OLD_ROOT"
+if (( KEEP )); then
+  log "Clone complete: $SITE_ROOT, database $DB_NAME"
+  log "Previous tree kept: $OLD_ROOT (remove it once the site is checked: chmod -R u+w, then rm -rf)"
+  log "Backup of the previous site: $BACKUP_DIR/$TARGET_BACKUP (restore.sh -c $TARGET_CONFIG $TARGET_BACKUP)"
+else
+  if (( TARGET_EXISTS )); then
+    log "Removing the previous clone $OLD_ROOT"
+    chmod -R u+w "$OLD_ROOT"
+    rm -rf "$OLD_ROOT"
+  fi
+  log "Clone complete: $SITE_ROOT, database $DB_NAME"
+  log "Web server: serve $CLONE_HOST from $(docroot_of "$SITE_ROOT") (virtual host, DNS, TLS)"
 fi
-
-log "Clone complete: $SITE_ROOT, database $CLONE_DB_NAME"
-log "Web server: serve $CLONE_HOST from $(docroot_of "$SITE_ROOT") (virtual host, DNS, TLS)"
 exit 0

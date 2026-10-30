@@ -237,6 +237,39 @@ collecteur de test et doivent être désactivés à la main. Un dossier privé
 situé hors de `SITE_ROOT` n'est pas copié : le script le signale, et il faut
 le surcharger dans un autre fichier de settings.
 
+### Dans l'autre sens : du staging vers la production
+
+Pour publier le staging en production, la production est une cible qui existe
+déjà : ajouter dans sa configuration (`/etc/drupal-backup/ev-euterpe.ch.conf`) :
+
+```bash
+CLONE_KEEP_SETTINGS=1
+```
+
+puis :
+
+```bash
+sudo /opt/drupal-backup/clone.sh -s staging.ev-euterpe.ch -t ev-euterpe.ch
+```
+
+Dans ce mode, le script :
+
+- demande de taper le nom du site cible pour confirmer ;
+- fait d'abord une sauvegarde de la production avec `backup.sh` ;
+- extrait les fichiers du staging, mais garde les `settings*.php`,
+  `services.yml` et `robots.txt` de la production. `settings.clone.php`
+  et le `robots.txt` du staging ne passent donc pas en production ;
+- ne touche ni à la base ni à l'utilisateur MySQL de la production : il en
+  vide les tables (`drush sql:drop`) puis importe la base du staging ;
+- n'applique aucun garde-fou de staging ;
+- garde l'ancienne arborescence dans `SITE_ROOT.before-clone-<date>` et
+  affiche la commande `restore.sh` qui permet de revenir en arrière.
+
+Attention : tout le contenu saisi en production depuis le dernier clone
+(nœuds, utilisateurs, commandes…) est remplacé par celui du staging. Les
+modules désinstallés sur le staging (`CLONE_UNINSTALL_MODULES`) le sont aussi
+en production après la publication.
+
 ## Sécurité
 
 - Les archives contiennent `settings.php` (mot de passe de la base,

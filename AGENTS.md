@@ -14,7 +14,7 @@ new one. User documentation: [README.md](README.md) (in French).
 | `upload-s3.sh [NAME]` | `verify_backup`, `rclone copy` + `rclone check --size-only`, S3 retention |
 | `download-s3.sh [--list\|NAME\|latest]` | List or download a backup, then `verify_backup` |
 | `restore.sh [opts] [NAME]` | Restore files and/or DB; keeps `$SITE_ROOT.before-restore-<date>` and a DB dump as safety nets |
-| `clone.sh -t TARGET [--backup NAME\|latest]` | Clone the source (`-s`) into a target site (own `.conf` with `CLONE_*`): fresh `backup.sh` or given backup, new DB + user via `CLONE_MYSQL`, `sites/default/settings.clone.php` included from `settings.php`, staging safeguards |
+| `clone.sh -t TARGET [--backup NAME\|latest]` | Clone the source (`-s`) into a target site (own `.conf` with `CLONE_*`): fresh `backup.sh` or given backup, new DB + user via `CLONE_MYSQL`, `sites/default/settings.clone.php` included from `settings.php`, staging safeguards. With `CLONE_KEEP_SETTINGS=1` the target is an existing site (e.g. staging → prod): backed up first, keeps its settings/robots.txt/DB credentials, tables dropped and replaced, old tree kept |
 | `backup.conf.example` | Documented config template (one file per site) |
 
 Helpers in `lib/common.sh`: `log`/`warn`/`die`, `load_config` (clears
@@ -60,7 +60,7 @@ the target), `acquire_lock` (flock on `$BACKUP_DIR/.lock`, new fd per call), `re
 2. Real run on a test site: `backup.sh -s SITE` → `upload-s3.sh -s SITE` →
    `download-s3.sh -s SITE --list`, then check exit codes.
 3. Error paths: a config with wrong keys must make `--list` exit 1.
-4. Never run `restore.sh` on a production site without the owner's explicit OK.
+4. Never run `restore.sh`, or `clone.sh` with a production target, on a production site without the owner's explicit OK.
 
 ## Open items
 
