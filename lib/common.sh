@@ -6,6 +6,9 @@
 
 set -Eeuo pipefail
 umask 077
+# cron runs with PATH=/usr/bin:/bin; runuser and other admin tools are in sbin.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR="${CONFIG_DIR:-/etc/drupal-backup}"
