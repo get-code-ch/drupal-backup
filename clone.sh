@@ -55,6 +55,20 @@ require_cmd tar gzip sha256sum flock
 php_quote() { local s="${1//\\/\\\\}"; printf "'%s'" "${s//\'/\\\'}"; }
 # Random letters and digits (safe in SQL and PHP strings).
 random_string() { head -c 96 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9' | cut -c "1-$1"; }
+# Value of a Drupal setting of the current site; fails if Drupal cannot bootstrap.
+drupal_setting() { (trap - ERR; drush php:eval "echo \Drupal\Core\Site\Settings::get('$1', '');" 2>/dev/null); }
+# Absolute, resolved path of a path setting of the current site (a relative
+# path is relative to the docroot).
+setting_path() { local p="$1"; [[ "$p" == /* ]] || p="$(docroot_of "$SITE_ROOT")/$p"; realpath -m "$p"; }
+# Path of the resolved path $1 relative to the tree $2, empty if outside.
+rel_to() { local root; root="$(realpath -m "$2")"; if [[ "$1" == "$root"/* ]]; then echo "${1#"$root"/}"; fi; }
+# Replaces directory $2 with a copy of $1 (moved instead if $3 = move).
+replace_dir() {
+  [[ -e "$2" ]] && { chmod -R u+w "$2"; rm -rf "$2"; }
+  mkdir -p "$(dirname "$2")"
+  if [[ "${3:-}" == move ]]; then mv "$1" "$2"; else cp -a "$1" "$2"; fi
+  [[ -z "$RESTORE_OWNER" ]] || chown -R "$RESTORE_OWNER" "$2"
+}
 
 # --- Source copy -------------------------------------------------------------
 if [[ -z "$BACKUP_NAME" ]]; then
@@ -82,6 +96,17 @@ if [[ -d "$SITE_ROOT" ]]; then
   SRC_DB_USER="$(trap - ERR; drush status --field=db-username 2>/dev/null)" || SRC_DB_USER=""
   [[ -n "$SRC_DB" ]] || warn "cannot read the database name of $SITE_NAME: make sure the target database is not the source one"
 fi
+# Private files directory of the source (checked against the live site):
+# SRC_PRIVATE = setting, SRC_PRIVATE_ABS = resolved path, SRC_PRIVATE_REL =
+# location in the tree (empty if outside, i.e. not in the backup).
+SRC_PRIVATE="" SRC_PRIVATE_OK=0 SRC_PRIVATE_ABS="" SRC_PRIVATE_REL=""
+if [[ -d "$SITE_ROOT" ]] && SRC_PRIVATE="$(drupal_setting file_private_path)"; then
+  SRC_PRIVATE_OK=1
+  if [[ -n "$SRC_PRIVATE" ]]; then
+    SRC_PRIVATE_ABS="$(setting_path "$SRC_PRIVATE")"
+    SRC_PRIVATE_REL="$(rel_to "$SRC_PRIVATE_ABS" "$SITE_ROOT")"
+  fi
+fi
 SRC_SITE="$SITE_NAME" SRC_ROOT="$SITE_ROOT" SRC_BACKUP_DIR="$BACKUP_DIR"
 
 # --- Target ------------------------------------------------------------------
@@ -108,6 +133,29 @@ if (( KEEP )); then
   [[ "$DB_NAME" =~ ^[A-Za-z0-9_]+$ ]] || die "unexpected database name for $SITE_NAME: $DB_NAME"
   [[ "$DB_NAME" != "$SRC_DB" ]] || die "$SRC_SITE and $SITE_NAME use the same database: $DB_NAME"
   (( $(db_exists "$DB_NAME") == 1 )) || die "database $DB_NAME of $SITE_NAME not found with ${CLONE_MYSQL[*]} (database on another server?)"
+
+  # Private files: the target keeps its settings, so the files of the source
+  # go where the target expects them (KEEP_PRIVATE_REL in the tree).
+  KEEP_PRIVATE_REL="" KEEP_PRIVATE_FROM=""
+  if ! TGT_PRIVATE="$(drupal_setting file_private_path)"; then
+    warn "cannot read file_private_path of $SITE_NAME: private files are not checked"
+  elif [[ -n "$TGT_PRIVATE" ]]; then
+    KEEP_PRIVATE_REL="$(rel_to "$(setting_path "$TGT_PRIVATE")" "$SITE_ROOT")"
+    [[ -n "$KEEP_PRIVATE_REL" ]] \
+      || die "the private files directory of $SITE_NAME is outside its tree ($TGT_PRIVATE): clone.sh cannot replace its content"
+    if (( ! SRC_PRIVATE_OK )); then
+      warn "cannot read file_private_path of $SRC_SITE: $KEEP_PRIVATE_REL is taken as is from the backup"
+    elif [[ -z "$SRC_PRIVATE" ]]; then
+      warn "$SRC_SITE has no private files directory: $KEEP_PRIVATE_REL is taken as is from the backup"
+    elif [[ -z "$SRC_PRIVATE_REL" ]]; then
+      # Outside the tree of the source, hence not in the backup: copied live.
+      KEEP_PRIVATE_FROM="$SRC_PRIVATE_ABS"
+    elif [[ "$SRC_PRIVATE_REL" != "$KEEP_PRIVATE_REL" ]]; then
+      [[ "$SRC_PRIVATE_REL/" != "$KEEP_PRIVATE_REL"/* && "$KEEP_PRIVATE_REL/" != "$SRC_PRIVATE_REL"/* ]] \
+        || die "private files directories overlap: $SRC_PRIVATE_REL ($SRC_SITE) and $KEEP_PRIVATE_REL ($SITE_NAME)"
+      KEEP_PRIVATE_FROM="tree:$SRC_PRIVATE_REL"
+    fi
+  fi
 else
   if (( TARGET_EXISTS )) && [[ ! -f "$(docroot_of "$SITE_ROOT")/sites/default/settings.clone.php" ]]; then
     die "$SITE_ROOT exists and was not created by clone.sh: refusing to replace it (existing site: set CLONE_KEEP_SETTINGS=1)"
@@ -126,6 +174,43 @@ else
   if (( ! TARGET_EXISTS )); then
     (( DB_EXISTS == 0 )) || die "database $CLONE_DB_NAME exists but $SITE_ROOT does not: refusing to drop it"
     (( USER_EXISTS == 0 )) || die "database user $CLONE_DB_USER@$CLONE_DB_GRANT_HOST exists but $SITE_ROOT does not: refusing to change its password"
+  fi
+
+  # Private files: the clone must not use the directory of the source. Inside
+  # the tree they follow the clone (absolute paths under $ORIG_ROOT are
+  # rewritten by settings.clone.php); elsewhere, CLONE_FILE_PRIVATE_PATH is
+  # required and gets a copy of them (PRIVATE_FROM).
+  PRIVATE_DST="" PRIVATE_FROM=""
+  if (( ! SRC_PRIVATE_OK )); then
+    [[ -z "$CLONE_FILE_PRIVATE_PATH" ]] \
+      || die "cannot read file_private_path of $SRC_SITE (drush php:eval), needed for CLONE_FILE_PRIVATE_PATH"
+    warn "cannot read file_private_path of $SRC_SITE: checked after the clone only"
+  elif [[ -n "$SRC_PRIVATE" && -n "$CLONE_FILE_PRIVATE_PATH" ]]; then
+    [[ "$CLONE_FILE_PRIVATE_PATH" == /* ]] || die "CLONE_FILE_PRIVATE_PATH must be an absolute path: $CLONE_FILE_PRIVATE_PATH"
+    PRIVATE_DST="$(realpath -m "$CLONE_FILE_PRIVATE_PATH")"
+    # Neither inside nor around the source, nor around the tree of the clone.
+    no_overlap=("$SRC_ROOT" "$SRC_PRIVATE_ABS")
+    [[ -z "$SRC_PRIVATE_REL" ]] || no_overlap+=("$SITE_ROOT/$SRC_PRIVATE_REL")
+    for d in "${no_overlap[@]}"; do
+      d="$(realpath -m "$d")"
+      [[ "$PRIVATE_DST" != "$d" && "$PRIVATE_DST" != "$d"/* && "$d" != "$PRIVATE_DST"/* ]] \
+        || die "CLONE_FILE_PRIVATE_PATH ($PRIVATE_DST) must not overlap $d"
+    done
+    d="$(realpath -m "$SITE_ROOT")"
+    [[ "$PRIVATE_DST" != "$d" && "$d" != "$PRIVATE_DST"/* ]] \
+      || die "CLONE_FILE_PRIVATE_PATH ($PRIVATE_DST) must be a directory of its own, not $SITE_ROOT or above"
+    if (( ! TARGET_EXISTS )) && [[ -n "$(ls -A "$PRIVATE_DST" 2>/dev/null)" ]]; then
+      die "$PRIVATE_DST is not empty but $SITE_ROOT does not exist: refusing to replace it"
+    fi
+    if [[ -n "$SRC_PRIVATE_REL" ]]; then
+      PRIVATE_FROM="tree:$SRC_PRIVATE_REL"
+    else
+      PRIVATE_FROM="$SRC_PRIVATE_ABS"
+    fi
+  elif [[ -n "$SRC_PRIVATE" ]]; then
+    if [[ -z "$SRC_PRIVATE_REL" || ( "$SRC_PRIVATE" == /* && "$SRC_PRIVATE" != "$ORIG_ROOT"/* ) ]]; then
+      die "file_private_path of $SRC_SITE ($SRC_PRIVATE) is outside $ORIG_ROOT: the clone would share it. Set CLONE_FILE_PRIVATE_PATH in $CONFIG_FILE"
+    fi
   fi
 fi
 
@@ -155,6 +240,10 @@ if (( ! KEEP )); then
   fi
   echo "  - database user: $CLONE_DB_USER@$CLONE_DB_GRANT_HOST (new password)"
   echo "  - host: $CLONE_HOST"
+  [[ -z "$PRIVATE_DST" ]] || echo "  - private files: copied into $PRIVATE_DST (REPLACED)"
+fi
+if (( KEEP )) && [[ -n "$KEEP_PRIVATE_FROM" ]]; then
+  echo "  - private files: ${KEEP_PRIVATE_FROM#tree:} of $SRC_SITE copied into $KEEP_PRIVATE_REL"
 fi
 if (( CLONE_STAGING )); then
   echo "  - staging: no e-mail sent, robots.txt disallows everything${CLONE_UNINSTALL_MODULES[*]:+, uninstall ${CLONE_UNINSTALL_MODULES[*]}}"
@@ -226,6 +315,13 @@ if (( KEEP )); then
     rm -f "$new_doc/robots.txt"
   fi
   log "Kept robots.txt"
+  if [[ "$KEEP_PRIVATE_FROM" == tree:* ]]; then
+    log "Private files: ${KEEP_PRIVATE_FROM#tree:} -> $KEEP_PRIVATE_REL"
+    replace_dir "$NEW_ROOT/${KEEP_PRIVATE_FROM#tree:}" "$NEW_ROOT/$KEEP_PRIVATE_REL" move
+  elif [[ -n "$KEEP_PRIVATE_FROM" ]]; then
+    log "Private files: $KEEP_PRIVATE_FROM -> $KEEP_PRIVATE_REL"
+    replace_dir "$KEEP_PRIVATE_FROM" "$NEW_ROOT/$KEEP_PRIVATE_REL"
+  fi
 else
   others="$(find "$new_doc/sites" -mindepth 2 -maxdepth 2 -name settings.php ! -path "$site_dir/*")"
   [[ -z "$others" ]] || warn "multisite: only sites/default is adapted, these still use the source settings: $others"
@@ -265,6 +361,12 @@ foreach (['file_private_path', 'file_temp_path', 'config_sync_directory'] as \$k
   }
 }
 EOF
+    if [[ -n "$PRIVATE_DST" ]]; then
+      cat <<EOF
+// Private files of the clone (CLONE_FILE_PRIVATE_PATH).
+\$settings['file_private_path'] = $(php_quote "$PRIVATE_DST");
+EOF
+    fi
     if (( CLONE_STAGING )); then
       cat <<'EOF'
 
@@ -331,6 +433,15 @@ mv "$NEW_ROOT" "$SITE_ROOT"
 trap - EXIT
 log "Files cloned in $SITE_ROOT"
 
+if (( ! KEEP )) && [[ -n "$PRIVATE_FROM" ]]; then
+  log "Private files: ${PRIVATE_FROM#tree:} -> $PRIVATE_DST"
+  if [[ "$PRIVATE_FROM" == tree:* ]]; then
+    replace_dir "$SITE_ROOT/${PRIVATE_FROM#tree:}" "$PRIVATE_DST" move
+  else
+    replace_dir "$PRIVATE_FROM" "$PRIVATE_DST"
+  fi
+fi
+
 if (( KEEP )); then
   log "Dropping current tables of $DB_NAME..."
   drush sql:drop -y
@@ -361,8 +472,8 @@ if (( ! KEEP )); then
   # Directories outside the clone would be shared with the source.
   for key in file_private_path config_sync_directory; do
     val="$(drush php:eval "echo \Drupal\Core\Site\Settings::get('$key', '');")"
-    if [[ "$val" == /* && "$val" != "$SITE_ROOT"/* ]]; then
-      warn "$key is outside the clone: $val (shared with the source?), override it in another settings file"
+    if [[ "$val" == /* && "$val" != "$SITE_ROOT"/* && "$val" != "$PRIVATE_DST" ]]; then
+      warn "$key is outside the clone: $val (shared with the source?)"
     fi
   done
 fi

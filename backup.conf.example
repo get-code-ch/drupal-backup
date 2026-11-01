@@ -71,6 +71,11 @@ LOCAL_RETENTION_DAYS=7
 # tables are replaced; it is backed up first. CLONE_HOST, CLONE_DB_* and
 # CLONE_STAGING are then ignored. CLONE_MYSQL is still used for the import.
 #CLONE_KEEP_SETTINGS=0
+# Private files directory of the clone, required when the one of the source
+# (file_private_path) is outside its SITE_ROOT: clone.sh copies the private
+# files of the source into it on each clone (its previous content is replaced).
+# Not needed when the private files are inside SITE_ROOT: they follow the clone.
+#CLONE_FILE_PRIVATE_PATH="/data/private/staging.example"
 
 # --- S3-compatible object storage --------------------------------------------
 # rclone provider: Other (Hetzner, generic), AWS, Cloudflare, Wasabi, Minio, Scaleway, ...

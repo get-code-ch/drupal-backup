@@ -231,11 +231,26 @@ toucher une base ou un utilisateur MySQL existants quand le dossier cible
 n'existe pas. Lors d'un rafraîchissement, l'ancien clone est supprimé une fois
 le nouveau en place.
 
+Fichiers privés (`file_private_path`) : le script lit le chemin sur le site
+source avant de commencer.
+
+- Dossier dans `SITE_ROOT` (cas courant) : il fait partie de la sauvegarde et
+  suit le clone. Un chemin absolu vers le site source est réécrit vers le
+  clone par `settings.clone.php`.
+- Dossier hors de `SITE_ROOT` : le clone l'utiliserait en même temps que la
+  production. Le script refuse alors de cloner tant que `CLONE_FILE_PRIVATE_PATH`
+  n'est pas défini dans la configuration de la cible. Ce dossier propre au
+  clone reçoit une copie des fichiers privés du site source à chaque clone
+  (son contenu précédent est remplacé).
+
+Le dossier privé est souvent sous la racine web (ici `DOCROOT="."`). Le
+`.htaccess` que Drupal y écrit n'est pas appliqué par tous les serveurs
+(OpenLiteSpeed, nginx) : le virtual host du clone doit bloquer l'accès à ce
+dossier comme celui de la production.
+
 Limites : seul `sites/default` est adapté (le multisite n'est pas géré). Les
 modules d'envoi d'e-mails comme Symfony Mailer ne passent pas par le
-collecteur de test et doivent être désactivés à la main. Un dossier privé
-situé hors de `SITE_ROOT` n'est pas copié : le script le signale, et il faut
-le surcharger dans un autre fichier de settings.
+collecteur de test et doivent être désactivés à la main.
 
 ### Dans l'autre sens : du staging vers la production
 
@@ -261,6 +276,9 @@ Dans ce mode, le script :
   et le `robots.txt` du staging ne passent donc pas en production ;
 - ne touche ni à la base ni à l'utilisateur MySQL de la production : il en
   vide les tables (`drush sql:drop`) puis importe la base du staging ;
+- place les fichiers privés du staging là où la production les attend (son
+  `file_private_path`, qui doit être dans son `SITE_ROOT`), même si le staging
+  les range ailleurs ;
 - n'applique aucun garde-fou de staging ;
 - garde l'ancienne arborescence dans `SITE_ROOT.before-clone-<date>` et
   affiche la commande `restore.sh` qui permet de revenir en arrière.
